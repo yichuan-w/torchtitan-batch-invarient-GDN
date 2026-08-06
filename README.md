@@ -173,20 +173,31 @@ python -m $M --module dapo_math --config rl_dapo_qwen3_5_35b_a3b_math_8k_{vllm_s
 # ..._smoke_{vllm_salt,unified,bi} are one-step 1024-token versions
 ```
 
-`pytest torchtitan/experiments/rl/tests/test_dapo_math_bi_arms.py` asserts the arms
-differ only in numerics alignment (same parallelism, batch, optimizer, sampling).
+`pytest torchtitan/experiments/rl/tests/test_bi_arms.py` asserts the arms differ only in
+numerics alignment (same parallelism, batch, optimizer, sampling) -- for both MATH and
+Search-R1.
 
 ### Search-R1 (multi-turn, short generation) -- §4.2.2
 
 ```bash
 # needs the e5/wiki-18 dense retriever on http://127.0.0.1:8000/retrieve first
-python -m torchtitan.experiments.rl.train --module search_r1 --config rl_grpo_qwen3_5_9b_search_r1          # vLLM native
-python -m torchtitan.experiments.rl.train --module search_r1 --config rl_grpo_qwen3_5_9b_search_r1_unified  # unified
+S="--module search_r1"
+python -m $M $S --config rl_grpo_qwen3_5_9b_search_r1              # vLLM native
+python -m $M $S --config rl_grpo_qwen3_5_9b_search_r1_unified      # unified, no BI
+python -m $M $S --config rl_grpo_qwen3_5_9b_search_r1_unified_bi   # unified + BI
 ```
 
-See [`examples/search_r1/README.md`](./torchtitan/experiments/rl/examples/search_r1/README.md)
-for the retriever setup. `..._unified_prefix` adds align-mode mamba prefix caching. The
-BI arm is the unified recipe plus the four coupled settings listed for tmax below.
+Qwen3.5-9B-Base, 8-way FSDP at TP=1, one generator at DP=8/TP=1, 8 prompts x 8 rollouts
+per step, 512-token responses in a 4096-token context, 500 steps, held-out NQ-500
+exact-match validation every 25 steps. See
+[`examples/search_r1/README.md`](./torchtitan/experiments/rl/examples/search_r1/README.md)
+for the retriever setup; `..._unified_prefix` is a prefix-caching diagnostic.
+
+The BI arm keeps prefix caching on under the **reset** policy (unlike tmax, which salts):
+a reset re-prefills in-flight samples under the new weights, so no sample straddles a
+weight version. The cluster runs also raised `num_rollout_workers` to 32 to keep the
+multi-turn rollouts off the controller GIL -- a throughput knob, left at the shared
+default in the recipe so the arms differ only in numerics.
 
 ### TMax terminal agent (multi-turn, long generation) -- §4.2.3
 
@@ -244,8 +255,6 @@ axis, so they add no mismatch).
   checkpoint mounts), not RL configuration. On one node, run the recipes directly and
   scale `trainer.parallelism` / `num_generators` to what you have.
 - The W&B projects and the plot data behind the figures.
-- The Search-R1 BI arm as a named recipe: it is `rl_grpo_qwen3_5_9b_search_r1_unified`
-  plus the same four settings listed under TMax.
 
 ## Credit
 

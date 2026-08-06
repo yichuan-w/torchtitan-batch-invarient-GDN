@@ -4,9 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""CPU tests for the Qwen3.5 DAPO-Math train/inference-mismatch arms.
+"""CPU tests for the Qwen3.5 train/inference-mismatch arms (MATH and Search-R1).
 
-The three arms must differ ONLY in how the trainer and generator are aligned
+The arms must differ ONLY in how the trainer and generator are aligned
 numerically; anything else drifting apart would invalidate the comparison the
 blog post draws between them.
 """
@@ -22,6 +22,10 @@ from torchtitan.experiments.rl.examples.dapo_math.config_registry import (  # no
     rl_dapo_qwen3_5_9b_math_8k_bi,
     rl_dapo_qwen3_5_9b_math_8k_unified,
     rl_dapo_qwen3_5_9b_math_8k_vllm_salt,
+)
+from torchtitan.experiments.rl.examples.search_r1.config_registry import (  # noqa: E402
+    rl_grpo_qwen3_5_9b_search_r1_unified,
+    rl_grpo_qwen3_5_9b_search_r1_unified_bi,
 )
 
 
@@ -76,3 +80,37 @@ def test_moe_arm_keeps_expert_parallelism_off():
     assert moe.generator.parallelism.expert_parallel_degree == 1
     assert moe.trainer.parallelism.data_parallel_shard_degree == 16
     assert moe.generator.parallelism.data_parallel_degree == 8
+
+
+def test_search_r1_bi_arm_differs_only_in_numerics_alignment():
+    unified = rl_grpo_qwen3_5_9b_search_r1_unified()
+    bi = rl_grpo_qwen3_5_9b_search_r1_unified_bi()
+
+    for side in ("trainer", "generator"):
+        assert not getattr(unified, side).debug.batch_invariant
+        assert getattr(bi, side).debug.batch_invariant
+        assert getattr(bi, side).debug.deterministic
+    assert bi.generator.gdn_trainer_parity
+    assert not unified.generator.gdn_trainer_parity
+    # FP32 GDN recurrent state, and sequence parallel off, which BI requires.
+    assert bi.generator.mamba_ssm_cache_dtype == "float32"
+    assert not bi.trainer.parallelism.enable_sequence_parallel
+
+    # Same model, data, batch, optimizer and sampling in both arms.
+    assert bi.generator.backend == unified.generator.backend == "torchtitan_wrapper"
+    assert bi.async_loop.group_size == unified.async_loop.group_size
+    assert bi.async_loop.max_offpolicy_steps == unified.async_loop.max_offpolicy_steps
+    assert bi.async_loop.num_training_steps == unified.async_loop.num_training_steps
+    assert bi.generator.sampling == unified.generator.sampling
+    assert bi.trainer.optimizer == unified.trainer.optimizer
+    assert bi.trainer.loss == unified.trainer.loss
+    assert bi.num_rollout_workers == unified.num_rollout_workers
+
+
+def test_search_r1_bi_arm_resets_the_prefix_cache_on_weight_sync():
+    """A reset re-prefills in-flight samples, so none straddles a weight version."""
+    bi = rl_grpo_qwen3_5_9b_search_r1_unified_bi()
+    assert bi.generator.enable_prefix_caching
+    assert not bi.generator.salt_prefix_cache_on_weight_sync
+    assert bi.generator.reset_prefix_cache_on_weight_sync
+    assert bi.generator.reset_running_requests_on_weight_sync

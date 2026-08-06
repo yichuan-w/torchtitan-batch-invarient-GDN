@@ -277,3 +277,54 @@ def rl_grpo_qwen3_5_9b_search_r1_unified_prefix() -> Controller.Config:
         enable_prefix_caching=True,
     )
     return config
+
+
+def rl_grpo_qwen3_5_9b_search_r1_unified_bi() -> Controller.Config:
+    """Batch-invariant arm of the Search-R1 train/inference-mismatch comparison.
+
+    The multi-turn workload of
+    https://yichuan-w.github.io/blog/GDN-train-inference-mismatch-asyncRL/
+
+    :func:`rl_grpo_qwen3_5_9b_search_r1_unified` with the trainer and generator
+    aligned op-for-op, and nothing else changed, so the two EM curves are
+    comparable:
+
+    - ``batch_invariant`` + ``deterministic`` on BOTH sides: batch-invariant
+      GEMM / log_softmax / mean, ``num_splits=1`` attention, deterministic
+      collectives.
+    - ``gdn_trainer_parity``: the generator runs the trainer's fla recurrence
+      for prefill AND decode, so the GDN layers agree bitwise rather than
+      chunked-vs-recurrent.
+    - FP32 GDN state cache, and a fixed seed on both sides.
+    - Sequence parallel off, which batch invariance requires.
+
+    Prefix caching stays on under the RESET policy (not the salt policy the tmax
+    recipe uses): a reset re-prefills in-flight samples under the new weights, so
+    no sample straddles a weight version.
+
+    The runs behind the post also raised ``num_rollout_workers`` to 32 to keep
+    the multi-turn rollouts off the controller GIL. That is a throughput knob,
+    not a numerics one, so it is left at the shared default here.
+    """
+    config = rl_grpo_qwen3_5_9b_search_r1_unified()
+    bi_debug = dict(batch_invariant=True, deterministic=True, seed=42)
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        debug=dataclasses.replace(config.trainer.debug, **bi_debug),
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism, enable_sequence_parallel=False
+        ),
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        debug=dataclasses.replace(config.generator.debug, **bi_debug),
+        gdn_trainer_parity=True,
+        mamba_ssm_cache_dtype="float32",
+        cache_cast_linear_weights=True,
+        enable_prefix_caching=True,
+        cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_DECODE_ONLY"),
+        salt_prefix_cache_on_weight_sync=False,
+        reset_prefix_cache_on_weight_sync=True,
+        reset_running_requests_on_weight_sync=True,
+    )
+    return config
