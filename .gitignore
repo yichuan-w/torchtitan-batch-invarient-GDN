@@ -43,6 +43,9 @@ Sessionx.vim
 # env files
 .env
 
+# the venv the README's install steps create
+titan-rl
+
 # Claude Code local configuration
 CLAUDE.local.md
 /test_*.py

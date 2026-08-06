@@ -58,12 +58,25 @@ from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fla.ops import (
-    chunk_gated_delta_rule as _vllm_chunk_gated_delta_rule,
-    fused_post_conv_prep,
-    fused_recurrent_gated_delta_rule_packed_decode,
-    fused_sigmoid_gating_delta_rule_update,
-)
+
+# vLLM's vendored fla moved from ``model_executor.layers.fla.ops`` to
+# ``third_party.flash_linear_attention.ops`` after the nightly this branch was
+# developed against, so try the current location first and fall back.
+try:
+    from vllm.third_party.flash_linear_attention.ops import (
+        chunk_gated_delta_rule as _vllm_chunk_gated_delta_rule,
+        fused_post_conv_prep,
+        fused_recurrent_gated_delta_rule_packed_decode,
+        fused_sigmoid_gating_delta_rule_update,
+    )
+except ImportError:
+    from vllm.model_executor.layers.fla.ops import (
+        chunk_gated_delta_rule as _vllm_chunk_gated_delta_rule,
+        fused_post_conv_prep,
+        fused_recurrent_gated_delta_rule_packed_decode,
+        fused_sigmoid_gating_delta_rule_update,
+    )
+
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
