@@ -193,6 +193,9 @@ exact-match validation every 25 steps. See
 [`examples/search_r1/README.md`](./torchtitan/experiments/rl/examples/search_r1/README.md)
 for the retriever setup; `..._unified_prefix` is a prefix-caching diagnostic.
 
+Both arms are the unified model at an off-policy window of 4
+(`max_offpolicy_steps=3`, the recipe default), so they differ only in BI.
+
 The BI arm keeps prefix caching on under the **reset** policy (unlike tmax, which salts):
 a reset re-prefills in-flight samples under the new weights, so no sample straddles a
 weight version. The cluster runs also raised `num_rollout_workers` to 32 to keep the
