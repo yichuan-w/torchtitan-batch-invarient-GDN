@@ -10,36 +10,35 @@ It is a fork of [pytorch/torchtitan](https://github.com/pytorch/torchtitan) plus
 work described in the post: one model definition shared by the trainer and the vLLM
 generator, and batch-invariant (BI) kernels for Qwen3.5's Gated DeltaNet (GDN) linear
 attention, so the trainer's recomputed logprob `pi` matches the generator's rollout
-logprob `mu` **bit for bit** at step 0.
+logprob `mu` bit for bit at step 0.
 
-## Please read this first
-
-**This repo is messy, and deliberately so.** It is a branch of a larger ongoing
-agentic-RL research project, not a curated release. You will find half-finished
-experiments, one-off diagnostic recipes, env-var switches with long comments,
-debug docs, and TODOs that have nothing to do with this blog post. Nothing has been
-tidied up for publication beyond removing internal paths. Please be understanding --
-and read the "Where the blog's pieces live" table below rather than the file tree, or
-you will spend a long time in code that is not part of the story.
-
+This is a research branch, not a release. Plenty of what is in the file tree has
+nothing to do with the post, so use the table below to find the code that does.
 Upstream torchtitan's own README is kept at
 [`README_torchtitan_upstream.md`](./README_torchtitan_upstream.md).
 
-## The result in one paragraph
+The production version is being upstreamed in
+[pytorch/torchtitan#3957](https://github.com/pytorch/torchtitan/pull/3957). Build on
+that PR if you want a maintained version. This repo keeps the configs that reproduce
+the post's results.
 
-Three arms, same data and recipe: (1) **vLLM native** -- trainer weights loaded into
-vLLM's own model implementation, the standard two-engine setup; (2) **unified, no BI**
--- trainer and generator share one model definition but run stock kernels;
-(3) **unified + BI** -- the same definition with batch-invariant kernels everywhere in
-the forward. Arm 3 reaches `bit_wise/logprob_diff/abs_mean == 0` at step 0 on all
-three workloads, so every nonzero value later is off-policy staleness rather than
-precision noise. It costs 2-3x trainer throughput on math and search, ~5x on the
-terminal agent, and it does **not** buy a clear accuracy win. The post argues for it
-as a debugging tool rather than a production default.
+## Result
+
+Three arms, same data and recipe: (1) *vLLM native*, trainer weights loaded into vLLM's
+own model implementation, the standard two-engine setup; (2) *unified, no BI*, where
+trainer and generator share one model definition but run stock kernels; (3) *unified +
+BI*, the same definition with batch-invariant kernels everywhere in the forward. Arm 3
+reaches `bit_wise/logprob_diff/abs_mean == 0` at step 0 on all three workloads, so
+every nonzero value after that is off-policy staleness. It costs 2-3x trainer
+throughput on math and search, ~5x on the terminal agent, and it does not buy a clear
+accuracy win. The post argues for it as a debugging tool rather than a production
+default.
 
 ## Install
 
-Verified on H100 / CUDA 13.0, Python 3.12. See
+Verified on H100 / CUDA 13.0, Python 3.12. Most of this pulls PyTorch nightlies, so it
+rots: if you are reading this long after the post, expect to pin the versions listed
+below. See
 [`torchtitan/experiments/rl/README.md`](./torchtitan/experiments/rl/README.md) for the
 long-form version of steps 1-5.
 
@@ -55,8 +54,9 @@ uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@mai
 uv pip install pygtrie portpicker
 uv pip install "git+https://github.com/PrimeIntellect-ai/renderers.git@main"
 
-# 2. PyTorch nightly + a matching vLLM wheel + torchcomms
-uv pip install torch vllm torchcomms --pre \
+# 2. PyTorch nightly + a matching vLLM wheel + torchcomms + torchvision.
+# Install torchvision HERE, from the nightly index. See the note below.
+uv pip install torch torchvision vllm torchcomms --pre \
   --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
   --index-strategy unsafe-best-match
 
@@ -66,16 +66,17 @@ uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/t
 # 4. batch-invariant kernels (REQUIRED for the BI arm): mm/addmm/log_softmax/mean
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 
-# 5. Qwen3.5 GDN kernels (fla) -- the chunked and recurrent gated-delta-rule kernels
-uv pip install flash-linear-attention av torchvision
+# 5. Qwen3.5 GDN kernels (fla): the chunked and recurrent gated-delta-rule kernels
+uv pip install flash-linear-attention av
 
-# 6. torchtitan itself
+# 6. torchtitan itself, then the per-example extras (dapo_math needs math-verify)
 uv pip install -r requirements.txt -r requirements-dev.txt
+uv pip install -r torchtitan/experiments/rl/examples/dapo_math/requirements.txt
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"   # Monarch-spawned workers inherit this
 ```
 
-Then download a checkpoint and smoke-test the loop end to end (this is also how you
-confirm the install; it needs one GPU pair, not the full topology):
+Then download a checkpoint and smoke-test the loop end to end. This is also how you
+confirm the install, and it runs on a single GPU pair:
 
 ```bash
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B \
@@ -90,40 +91,63 @@ python -m torchtitan.experiments.rl.train --module alphabet_sort \
   --config rl_grpo_qwen3_0_6b_varlen_batch_invariant
 ```
 
-Notes that cost real time if you miss them:
+Four things that cost real time if you miss them:
 
-- The **vLLM wheel must match the PyTorch nightly build date** (both from the cu130
-  nightly index). A mismatched pair fails at import or, worse, at the first
-  custom-op call.
-- `flash-linear-attention` is only needed for Qwen3.5 (GDN); dense Qwen3 does not use
-  it. On Hopper, `fla`'s tilelang-backed backward may need `apache-tvm-ffi` +
-  `tilelang` and a `CUDA_HOME` pointing at a CUDA 13 toolchain.
-- W&B is on by default (`wandb login`, or pass `--metrics.no-enable-wandb`).
+- **torch, vllm, torchcomms and torchvision must all come from the cu130 nightly
+  index, in one resolve.** They pin each other to an exact nightly date. The classic
+  way to break this is to install `torchvision` from PyPI afterwards: it depends on
+  *stable* torch, silently downgrades the nightly, and then `import torch` dies with
+  `undefined symbol: _ZNK4c10d7Backend15incref_pyobjectEv`.
+- The versions this snapshot was developed and verified against, if the latest
+  nightly has drifted:
 
-## Where the blog's pieces live
+  ```bash
+  uv pip install "torch==2.13.0.dev20260608+cu130" \
+    "torchvision==0.28.0.dev20260609+cu130" "vllm==1.0.0.dev20260608+cu130" \
+    "torchcomms==0.3.0.dev20260609" --pre \
+    --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+    --index-strategy unsafe-best-match
+  uv pip install --no-deps "spmd_types==0.2.1"   # vLLM's pin downgrades this
+  ```
+
+  Newer vLLM nightlies move APIs this branch calls into; the further you get from
+  those dates, the more you will have to port.
+- **`CUDA_HOME` must point at a CUDA 13 toolchain**, e.g. `/usr/local/cuda-13.0`.
+  These are cu130 wheels, and both flashinfer's sampler kernels and `fla`'s
+  tilelang-backed backward JIT-compile at runtime against whatever `nvcc` is on
+  `PATH`. A CUDA 12 `nvcc` fails those compiles.
+- `flash-linear-attention` is only needed for Qwen3.5 GDN; dense Qwen3 does not use
+  it. W&B is on by default, so run `wandb login` or pass `--metrics.no-enable-wandb`.
+
+## Code map
+
+<details>
+<summary>Section-by-section map from the post to the code</summary>
 
 | Blog | Knob / code |
 |---|---|
-| §3.1 one model definition (unified) | `generator.backend="torchtitan_wrapper"`. The two-engine baseline is `backend="vllm_native"`. Wrapper: `torchtitan/experiments/rl/models/vllm_wrapper.py`; the GDN layer that borrows only vLLM's paged cache: `models/gdn_vllm_unified.py` (see [`GDN_UNIFIED_PREFILL.md`](./torchtitan/experiments/rl/models/GDN_UNIFIED_PREFILL.md)) |
+| §3.1 one model definition (unified) | `generator.backend="torchtitan_wrapper"`. The two-engine baseline is `backend="vllm_native"`. Wrapper: `torchtitan/experiments/rl/models/vllm_wrapper.py`; the GDN layer that borrows only vLLM's paged cache: `models/gdn_vllm_unified.py` |
 | §3.2 recurrent forward / chunked backward (trainer) | `_RecurrentFwdChunkBwd` in `torchtitan/models/qwen3_5/model.py`, selected when `debug.batch_invariant` is on |
 | §3.2 recurrent prefill **and** decode (generator) | `_forward_recurrent_bi` / `set_trainer_parity_fla` in `torchtitan/experiments/rl/models/gdn_vllm_unified.py`, enabled by `generator.gdn_trainer_parity=True` |
 | §2 BI GEMM / RMSNorm / log_softmax, deterministic NCCL | `DebugConfig(batch_invariant=True, deterministic=True)` -> `set_batch_invariance()` in `torchtitan/distributed/utils.py`, backed by `batch_invariant_ops` |
 | §2 attention `num_splits=1` (no split-KV) | `torchtitan/models/common/attention.py` (trainer) and `torchtitan/experiments/rl/models/attention.py` (generator) |
-| MoE: batch-invariant `bmm` for the router gate | `patch_bmm_for_batch_invariance()` in `torchtitan/experiments/rl/batch_invariance.py` (also the flex-attention tile pinning and the small-M matmul tuning) |
+| MoE: batch-invariant `bmm` for the router gate | `patch_bmm_for_batch_invariance()` in `torchtitan/experiments/rl/batch_invariance.py`, which also holds the flex-attention tile pinning and the small-M matmul tuning |
 | §4.1 off-policy window (`offpolicy = 4 / 12 / 32`) | `AsyncLoopConfig.max_offpolicy_steps` in `torchtitan/experiments/rl/controller.py` |
 | §4.1 keep the KV cache across a weight swap | `generator.salt_prefix_cache_on_weight_sync` (default) vs `reset_prefix_cache_on_weight_sync` / `reset_running_requests_on_weight_sync` |
-| The full bitwise-parity derivation | [`torchtitan/experiments/rl/models/GDN_BITWISE_PARITY.md`](./torchtitan/experiments/rl/models/GDN_BITWISE_PARITY.md) -- component by component, with the ablation table |
+| The full bitwise-parity derivation | [`torchtitan/experiments/rl/models/GDN_BITWISE_PARITY.md`](./torchtitan/experiments/rl/models/GDN_BITWISE_PARITY.md), component by component, with the ablation table |
+
+</details>
 
 Metrics the post plots, as logged:
 
-- `bit_wise/logprob_diff/{mean,abs_mean,max}` and `bit_wise/ratio_tokens_different/mean`
-  (computed in `torchtitan/experiments/rl/losses/{dapo,dppo}.py`)
-- `rollout_reward/avg_train_reward` -- the de-biased training-reward curve
-- `validation_reward/_mean` -- held-out eval (AIME2025 for math, EM for search)
-- `perf/trainer/tokens_per_second_full_step` -- the throughput number quoted for all
+- `bit_wise/logprob_diff/{mean,abs_mean,max}` and `bit_wise/ratio_tokens_different/mean`,
+  computed in `torchtitan/experiments/rl/losses/{dapo,dppo}.py`
+- `rollout_reward/avg_train_reward`, the de-biased training-reward curve
+- `validation_reward/_mean`, held-out eval: AIME2025 for math, exact match for search
+- `perf/trainer/tokens_per_second_full_step`, the throughput number quoted for all
   three workloads
 
-## Running the three workloads
+## The three workloads
 
 Every recipe is a function in `torchtitan/experiments/rl/examples/<name>/config_registry.py`
 and is selected by name:
@@ -132,7 +156,7 @@ and is selected by name:
 python -m torchtitan.experiments.rl.train --module <example> --config <recipe_fn>
 ```
 
-### MATH (single-turn, long generation) -- §4.2.1
+### MATH: single-turn, long generation (§4.2.1)
 
 The three arms of the case study, all in
 [`examples/dapo_math/config_registry.py`](./torchtitan/experiments/rl/examples/dapo_math/config_registry.py):
@@ -140,13 +164,13 @@ The three arms of the case study, all in
 ```bash
 M=torchtitan.experiments.rl.train
 
-# red   -- vLLM native: vLLM's own model implementation, trainer weights loaded in
+# red   vLLM native: vLLM's own model implementation, trainer weights loaded in
 python -m $M --module dapo_math --config rl_dapo_qwen3_5_9b_math_8k_vllm_salt
 
-# brown -- unified: one shared TorchTitan model definition, stock kernels
+# brown unified: one shared TorchTitan model definition, stock kernels
 python -m $M --module dapo_math --config rl_dapo_qwen3_5_9b_math_8k_unified
 
-# grey  -- unified + BI: the same definition with batch-invariant kernels
+# grey  unified + BI: the same definition with batch-invariant kernels
 python -m $M --module dapo_math --config rl_dapo_qwen3_5_9b_math_8k_bi
 ```
 
@@ -162,10 +186,11 @@ DP=8/TP=1, 8 prompts x 16 rollouts per step, 8K response cap in a 10,240-token p
 context, AdamW at a constant 1e-6, DAPO clip `(0.2, 0.28)`, AIME2025 validation every
 10 steps. `..._32k` / `..._32k_bi` are the 32K-response variants, and
 `rl_dapo_qwen3_4b_math_8k` is the dense single-node Qwen3-4B recipe the Qwen3.5 arms
-are derived from (see
-[`examples/dapo_math/README.md`](./torchtitan/experiments/rl/examples/dapo_math/README.md)).
+are derived from. See
+[`examples/dapo_math/README.md`](./torchtitan/experiments/rl/examples/dapo_math/README.md)
+for the rest of the settings.
 
-**MoE (the post's "Curious about MoE?" appendix):** the same three arms on
+**MoE.** The post's "Curious about MoE?" appendix runs the same three arms on
 Qwen3.5-35B-A3B, at `EP = 1` on both sides so no MoE all-to-all enters the comparison:
 
 ```bash
@@ -173,11 +198,11 @@ python -m $M --module dapo_math --config rl_dapo_qwen3_5_35b_a3b_math_8k_{vllm_s
 # ..._smoke_{vllm_salt,unified,bi} are one-step 1024-token versions
 ```
 
-`pytest torchtitan/experiments/rl/tests/test_bi_arms.py` asserts the arms differ only in
-numerics alignment (same parallelism, batch, optimizer, sampling) -- for both MATH and
-Search-R1.
+`pytest torchtitan/experiments/rl/tests/test_bi_arms.py` asserts that the MATH and
+Search-R1 arms differ only in numerics alignment: same parallelism, batch, optimizer,
+and sampling.
 
-### Search-R1 (multi-turn, short generation) -- §4.2.2
+### Search-R1: multi-turn, short generation (§4.2.2)
 
 ```bash
 # needs the e5/wiki-18 dense retriever on http://127.0.0.1:8000/retrieve first
@@ -193,20 +218,20 @@ exact-match validation every 25 steps. See
 [`examples/search_r1/README.md`](./torchtitan/experiments/rl/examples/search_r1/README.md)
 for the retriever setup; `..._unified_prefix` is a prefix-caching diagnostic.
 
-Both arms are the unified model at an off-policy window of 4
-(`max_offpolicy_steps=3`, the recipe default), so they differ only in BI.
+Both arms are the unified model at an off-policy window of 4, the recipe default of
+`max_offpolicy_steps=3`.
 
-The BI arm keeps prefix caching on under the **reset** policy (unlike tmax, which salts):
-a reset re-prefills in-flight samples under the new weights, so no sample straddles a
-weight version. The cluster runs also raised `num_rollout_workers` to 32 to keep the
-multi-turn rollouts off the controller GIL -- a throughput knob, left at the shared
-default in the recipe so the arms differ only in numerics.
+The BI arm keeps prefix caching on under the **reset** policy, where tmax salts
+instead: a reset re-prefills in-flight samples under the new weights, so no sample
+straddles a weight version. The cluster runs also raised `num_rollout_workers` to 32 to
+keep the multi-turn rollouts off the controller GIL. That is a throughput knob, and the
+recipe leaves it at the shared default.
 
-### TMax terminal agent (multi-turn, long generation) -- §4.2.3
+### TMax terminal agent: multi-turn, long generation (§4.2.3)
 
 ```bash
 # one-time: materialize allenai/tmax-15k-open-instruct into the task JSONL
-# (writes a 5-task tmax_smoke.jsonl next to --out as well)
+# also writes a 5-task tmax_smoke.jsonl next to --out
 HF_TOKEN=... python -m torchtitan.experiments.rl.examples.tmax.prepare_tmax_data \
   --out ./tmax_train.jsonl
 
@@ -214,14 +239,14 @@ HF_TOKEN=... python -m torchtitan.experiments.rl.examples.tmax.prepare_tmax_data
 SWE_PROMPT_DATA=./tmax_train.jsonl DAYTONA_API_KEY=... \
   python -m torchtitan.experiments.rl.train --module tmax --config rl_grpo_qwen3_5_9b_tmax
 
-# unified + BI (the arm the post calls "with BI")
+# unified + BI, the arm the post calls "with BI"
 SWE_GDN_BI=1 SWE_PROMPT_DATA=./tmax_train.jsonl DAYTONA_API_KEY=... \
   python -m torchtitan.experiments.rl.train --module tmax --config rl_grpo_qwen3_5_9b_tmax
 ```
 
 `SWE_GDN_BI=1` is the single switch for the BI arm; it flips the four coupled settings
-that path requires (see the comment at that branch in
-`examples/tmax/config_registry.py`):
+that path requires, documented at that branch in
+`examples/tmax/config_registry.py`:
 
 1. trainer `debug.batch_invariant` -> recurrent forward, chunked backward
 2. generator `debug.batch_invariant` -> the recurrent-everywhere decode path
@@ -231,31 +256,58 @@ that path requires (see the comment at that branch in
 Each rollout needs a [Daytona](https://www.daytona.io/) sandbox, so a real TMax run
 needs an API key and enough sandbox quota; `examples/tmax/local_smoke.py` is the
 smallest thing that exercises the path. `rl_grpo_qwen3_4b_tmax` is the **dense**
-(softmax-attention) control from the post's methodology: same recipe, no GDN, BI on.
+softmax-attention control from the post's methodology: same recipe, no GDN, BI on.
 
 **One operational trap, repeated from the post:** BI makes generation several times
 slower, so the agent's wall-clock budgets have to be widened by roughly the same
 factor. If you skip that, rollouts that would have finished get killed for running
-long, and an unsubmitted rollout scores 0 -- the slowdown then shows up as a *reward*
-regression instead of a throughput one.
+long, and an unsubmitted rollout scores 0. The slowdown then shows up as a *reward*
+regression.
 
-## Verifying parity yourself
+## Parity checks
+
+These run under plain pytest on one GPU:
 
 ```bash
 pytest torchtitan/experiments/rl/tests/test_qwen3_5_gdn_bi.py     # GDN batch invariance
-pytest torchtitan/experiments/rl/tests/test_bitwise_parity.py     # trainer/generator parity (GPU)
 pytest torchtitan/experiments/rl/tests/test_qwen3_5_gdn_packing.py
+pytest torchtitan/experiments/rl/tests/test_bi_arms.py            # the arms differ only in numerics
 ```
 
-Parity holds only when the trainer and generator run the **same parallelism** (the
-post's runs are `TP = 1` on both sides; DP and FSDP do not reduce along the batch
-axis, so they add no mismatch).
+The trainer-vs-generator parity test needs a real checkpoint and a torchrun launcher.
+Under plain `pytest` every case skips itself with "requires torchrun launcher", so it
+looks like it ran when it did not:
+
+```bash
+python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B \
+  --local_dir torchtitan/experiments/rl/example_checkpoint --all
+
+# HF_ASSETS_PATH must be ABSOLUTE: the checkpoint loader rejects relative paths
+export HF_ASSETS_PATH="$PWD/torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B"
+export CUDA_HOME=/usr/local/cuda-13.0
+
+# one torchrun per backend, so each gets a fresh process group and vLLM engine
+torchrun --nproc_per_node=2 -m pytest \
+  torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
+torchrun --nproc_per_node=2 -m pytest \
+  torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
+```
+
+Only rank 0 asserts, so read that rank's summary and ignore the interleaved output.
+
+Parity here is a `TP = 1` claim. The post's runs and every arm in this repo put
+`TP = 1` on both the trainer and the generator; DP and FSDP add no mismatch, since
+neither reduces along the batch axis. The bundled
+`rl_grpo_qwen3_0_6b_*_batch_invariant` recipes these test classes use are `TP = 2`,
+since they double as the TP coverage in CI, and on this branch they land ~1e-6 apart
+rather than at zero. Run the parity test with `TP = 1` on both sides to reproduce the
+bitwise result.
 
 ## What is not here
 
 - The multi-host launcher that submitted the 40-56 GPU jobs. The recipes it wrapped are
-  all in this repo; what it added was cluster placement (host counts, regions,
-  checkpoint mounts), not RL configuration. On one node, run the recipes directly and
+  all in this repo; what it added was cluster placement: host counts, regions,
+  checkpoint mounts. On one node, run the recipes directly and
   scale `trainer.parallelism` / `num_generators` to what you have.
 - The W&B projects and the plot data behind the figures.
 
