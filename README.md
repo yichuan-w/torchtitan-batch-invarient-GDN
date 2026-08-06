@@ -134,16 +134,47 @@ python -m torchtitan.experiments.rl.train --module <example> --config <recipe_fn
 
 ### MATH (single-turn, long generation) -- §4.2.1
 
+The three arms of the case study, all in
+[`examples/dapo_math/config_registry.py`](./torchtitan/experiments/rl/examples/dapo_math/config_registry.py):
+
 ```bash
-python -m torchtitan.experiments.rl.train --module dapo_math --config rl_dapo_qwen3_4b_math_8k
+M=torchtitan.experiments.rl.train
+
+# red   -- vLLM native: vLLM's own model implementation, trainer weights loaded in
+python -m $M --module dapo_math --config rl_dapo_qwen3_5_9b_math_8k_vllm_salt
+
+# brown -- unified: one shared TorchTitan model definition, stock kernels
+python -m $M --module dapo_math --config rl_dapo_qwen3_5_9b_math_8k_unified
+
+# grey  -- unified + BI: the same definition with batch-invariant kernels
+python -m $M --module dapo_math --config rl_dapo_qwen3_5_9b_math_8k_bi
 ```
 
-See [`examples/dapo_math/README.md`](./torchtitan/experiments/rl/examples/dapo_math/README.md).
-**Caveat:** what is checked in here is the *single-node Qwen3-4B* DAPO-Math recipe. The
-post's math runs are Qwen3.5-9B-Base on 40 GPUs (8-way FSDP trainer + 4 vLLM generators
-at DP=8) driven by a multi-host launcher that is not part of this repo, so the exact 9B
-recipe file is not here. The knobs that define the arms are the ones in the table above,
-and the off-policy sweep is `AsyncLoopConfig.max_offpolicy_steps = 4 / 12 / 32`.
+The off-policy sweep is a CLI override on any arm:
+
+```bash
+python -m $M --module dapo_math --config rl_dapo_qwen3_5_9b_math_8k_bi \
+  --async_loop.max_offpolicy_steps 12      # the post sweeps 4 / 12 / 32
+```
+
+Qwen3.5-9B-Base, 8-way FSDP trainer at TP=1 with FullAC, one generator replica at
+DP=8/TP=1, 8 prompts x 16 rollouts per step, 8K response cap in a 10,240-token packed
+context, AdamW at a constant 1e-6, DAPO clip `(0.2, 0.28)`, AIME2025 validation every
+10 steps. `..._32k` / `..._32k_bi` are the 32K-response variants, and
+`rl_dapo_qwen3_4b_math_8k` is the dense single-node Qwen3-4B recipe the Qwen3.5 arms
+are derived from (see
+[`examples/dapo_math/README.md`](./torchtitan/experiments/rl/examples/dapo_math/README.md)).
+
+**MoE (the post's "Curious about MoE?" appendix):** the same three arms on
+Qwen3.5-35B-A3B, at `EP = 1` on both sides so no MoE all-to-all enters the comparison:
+
+```bash
+python -m $M --module dapo_math --config rl_dapo_qwen3_5_35b_a3b_math_8k_{vllm_salt,unified,bi}
+# ..._smoke_{vllm_salt,unified,bi} are one-step 1024-token versions
+```
+
+`pytest torchtitan/experiments/rl/tests/test_dapo_math_bi_arms.py` asserts the arms
+differ only in numerics alignment (same parallelism, batch, optimizer, sampling).
 
 ### Search-R1 (multi-turn, short generation) -- §4.2.2
 
@@ -208,11 +239,13 @@ axis, so they add no mismatch).
 
 ## What is not here
 
-- The multi-host launcher and job configs used for the 40-56 GPU runs.
+- The multi-host launcher that submitted the 40-56 GPU jobs. The recipes it wrapped are
+  all in this repo; what it added was cluster placement (host counts, regions,
+  checkpoint mounts), not RL configuration. On one node, run the recipes directly and
+  scale `trainer.parallelism` / `num_generators` to what you have.
 - The W&B projects and the plot data behind the figures.
-- The blog's MoE arm as a dedicated recipe (Qwen3.5-35B-A3B; the model itself is in
-  `torchtitan/models/qwen3_5/`, and the extra piece it needed is the batch-invariant
-  `bmm` above).
+- The Search-R1 BI arm as a named recipe: it is `rl_grpo_qwen3_5_9b_search_r1_unified`
+  plus the same four settings listed under TMax.
 
 ## Credit
 
