@@ -1,0 +1,62 @@
+__pycache__
+.idea
+.DS_Store
+*.egg-info
+build
+outputs
+dist/*
+.vscode
+.vs
+
+# data
+data
+out
+wandb
+
+torchtitan/datasets/**/*.model
+
+# hf assets
+assets/hf/*
+assets/tokenizer/*
+torchtitan/experiments/flux/assets/*
+
+# temp files
+*.log
+error.json
+_remote_module_non_scriptable.py
+
+# Editor temporaries (VIM)
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+Session.vim
+Sessionx.vim
+.netrwhist
+*~
+.~lock.*
+
+# macOS dir files
+.DS_Store
+
+# env files
+.env
+
+# Claude Code local configuration
+CLAUDE.local.md
+/test_*.py
+/debug_*.py
+CLAUDE_CONTEXT/
+/.claude/settings.local.json
+
+# Lychee (link checker) cache
+.lycheecache
+
+# Locally generated Qwen3.5 batch-invariant diagram
+/docs/qwen3_5_batch_invariant_mode.dot
+/docs/qwen3_5_batch_invariant_mode.svg
+/docs/qwen3_5_batch_invariant_mode.png
+
+# Locally generated RewardTMax training curve
+/rollout_reward_tmax_mean.png

@@ -1,0 +1,205 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
+
+
+from dataclasses import dataclass
+
+import torch
+from transformers import CLIPTokenizer, T5Tokenizer
+
+from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
+
+
+class FluxTokenizerContainer(BaseTokenizer):
+    """Container holding both T5 and CLIP tokenizers for Flux.
+
+    This plugs into Trainer.Config.tokenizer so that tokenizers are built
+    by the trainer (via Configurable.Config.build) rather than inside the
+    dataloader.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseTokenizer.Config):
+        t5_tokenizer_path: str = "google/t5-v1_1-small"
+        """HuggingFace model name or local path for the T5 tokenizer."""
+        clip_tokenizer_path: str = "openai/clip-vit-large-patch14"
+        """HuggingFace model name or local path for the CLIP tokenizer."""
+        max_t5_encoding_len: int = 256
+        test_mode: bool = False
+
+    def __init__(self, config: Config, **kwargs):
+        super().__init__()
+        if config.test_mode:
+            tokenizer_class = FluxTestTokenizer
+        else:
+            tokenizer_class = FluxTokenizer
+
+        t5_path = config.t5_tokenizer_path
+        clip_path = config.clip_tokenizer_path
+
+        self.t5_tokenizer: BaseTokenizer = tokenizer_class(
+            t5_path, max_length=config.max_t5_encoding_len
+        )
+        self.clip_tokenizer: BaseTokenizer = tokenizer_class(clip_path, max_length=77)
+
+    # pyrefly: ignore [bad-override]
+    def encode(self, text: str | list[str]) -> dict[str, torch.Tensor]:
+        """Encode text using both T5 and CLIP tokenizers.
+
+        Args:
+            text: A string or list of strings to encode.
+
+        Returns:
+            A dict with keys "clip" and "t5", each mapping to a torch.Tensor.
+        """
+        return {  # pyrefly: ignore [bad-return]
+            "clip": self.clip_tokenizer.encode(text),
+            "t5": self.t5_tokenizer.encode(text),
+        }
+
+    # pyrefly: ignore [bad-override]
+    def decode(self, tokens: dict[str, list[int]]) -> dict[str, str]:
+        """Decode token IDs using both T5 and CLIP tokenizers.
+
+        Args:
+            tokens: A dict with keys "clip" and/or "t5".
+
+        Returns:
+            A dict with keys "clip_text" and/or "t5_text".
+        """
+        results = {}
+        if "t5" in tokens:
+            results["t5_text"] = self.t5_tokenizer.decode(tokens["t5"])
+        if "clip" in tokens:
+            results["clip_text"] = self.clip_tokenizer.decode(tokens["clip"])
+        return results
+
+    def get_vocab_size(self) -> int:
+        return self.t5_tokenizer.get_vocab_size()
+
+
+class FluxTestTokenizer(BaseTokenizer):
+    """
+    Flux Tokenizer for test purpose. This is a simple wrapper around the TikTokenizer,
+     to make it has same interface as the T5 and CLIP tokenizer used for Flux.
+    """
+
+    def __init__(self, model_path: str = "t5-small", max_length: int = 77, **hf_kwargs):
+        self.tiktokenizer = HuggingFaceTokenizer(tokenizer_path=model_path, **hf_kwargs)
+        self._max_length = max_length
+        self.pad_id = 0
+
+    def _pad_and_chunk_tokens(
+        self, tokens: list[int], max_length: int, pad_token: int
+    ) -> list[int]:
+        # Pad the token sequence to max_length
+        if len(tokens) < max_length:
+            # If tokens are shorter than max_length, pad with pad_id or eos_id if pad_id is not defined
+            padding = [pad_token] * (max_length - len(tokens))
+            tokens = tokens + padding
+
+        # Chunk the token sequence to max_length
+        if len(tokens) > max_length:
+            tokens = tokens[:max_length]
+
+        return tokens
+
+    def get_vocab_size(self) -> int:
+        return self.tiktokenizer.vocab_size
+
+    # pyrefly: ignore [bad-override]
+    def encode(self, text: str | list[str]) -> torch.Tensor:
+        """
+        Use TikTokenizer to encode the text into tokens, and then pad and chunk the tokens to max_length.
+        """
+        if isinstance(text, list):
+            if len(text) == 1:
+                # for single item in list encode and add batch dimension
+                tokens = self.tiktokenizer.encode(text[0], add_bos=True, add_eos=True)
+                tokens = self._pad_and_chunk_tokens(
+                    tokens, self._max_length, self.pad_id
+                )
+                return torch.tensor(tokens).unsqueeze(0)
+            else:
+                all_tokens = []
+                for t in text:
+                    tokens = self.tiktokenizer.encode(t, add_bos=True, add_eos=True)
+                    tokens = self._pad_and_chunk_tokens(
+                        tokens, self._max_length, self.pad_id
+                    )
+                    all_tokens.append(torch.tensor(tokens))
+                return torch.stack(all_tokens)
+        else:
+            tokens = self.tiktokenizer.encode(text, add_bos=True, add_eos=True)
+            tokens = self._pad_and_chunk_tokens(tokens, self._max_length, self.pad_id)
+            return torch.tensor(tokens)
+
+    # pyrefly: ignore [bad-override]
+    def decode(self, t: list[int]) -> str:
+        """
+        Decode function. This function will not be called.
+        """
+        return self.tiktokenizer.decode(t)
+
+
+class FluxTokenizer(BaseTokenizer):
+    """
+    Tokenizing and encoding/decoding text using the T5 or Clip tokenizer.
+
+    Args:
+        model_path (str): Path to the tokenzier from hugging face.
+
+    """
+
+    def __init__(self, model_path: str = "t5-small", max_length: int = 77, **hf_kwargs):
+        super().__init__()
+        self._n_words = 8  # TODO(jianiw): check
+        self._max_length = max_length
+
+        self.is_clip = "clip" in model_path.lower()
+
+        if self.is_clip:
+            # pyrefly: ignore [bad-assignment]
+            self._tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(
+                model_path, max_length=max_length, **hf_kwargs
+            )
+        else:
+            # pyrefly: ignore [bad-assignment]
+            self._tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(
+                model_path, max_length=max_length, **hf_kwargs
+            )
+
+    def get_vocab_size(self) -> int:
+        return self._tokenizer.vocab_size
+
+    # pyrefly: ignore [bad-override]
+    def encode(
+        self,
+        s: str | list[str],
+    ) -> torch.Tensor:
+        """
+        Encode the prompt text into tokens.
+        """
+        tokens = self._tokenizer(
+            s,
+            truncation=True,
+            max_length=self._max_length,
+            return_length=False,
+            return_overflowing_tokens=False,
+            padding="max_length",
+            return_tensors="pt",  # return pytorch tensors, default return list[int]
+        )["input_ids"]
+        return tokens
+
+    # pyrefly: ignore [bad-override]
+    def decode(self, t: list[int]) -> list[str] | str:
+        """
+        Decode function. This function will not be called.
+        """
+        return self._tokenizer.decode(t)

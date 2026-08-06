@@ -1,0 +1,241 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import MSELoss
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.quantization import MXFP8LinearConverter
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
+from torchtitan.models.flux.flux_datasets import FluxDataLoader
+from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
+from torchtitan.models.flux.trainer import FluxTrainer
+from torchtitan.models.flux.validate import FluxValidator
+
+from . import model_registry
+
+
+def flux_debugmodel() -> FluxTrainer.Config:
+    hf_assets_path = "tests/assets/tokenizer"
+    return FluxTrainer.Config(
+        hf_assets_path=hf_assets_path,
+        loss=MSELoss.Config(),
+        tokenizer=FluxTokenizerContainer.Config(
+            t5_tokenizer_path="google/t5-v1_1-xxl",
+            clip_tokenizer_path="openai/clip-vit-large-patch14",
+            max_t5_encoding_len=256,
+        ),
+        encoder=FluxEncoderConfig(
+            autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
+        ),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_registry("flux-debug"),
+        optimizer=default_adamw(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=1,
+            decay_ratio=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=4,
+            max_norm=2.0,
+            steps=10,
+        ),
+        dataloader=FluxDataLoader.Config(
+            prompt_dropout_prob=0.447,
+            img_size=256,
+        ),
+        parallelism=ParallelismConfig(context_parallel_degree=1),
+        activation_checkpoint=FullAC.Config(),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        validator=FluxValidator.Config(
+            freq=5,
+            steps=48,
+            sampling=SamplingConfig(
+                enable_classifier_free_guidance=True,
+                classifier_free_guidance_scale=5.0,
+                denoising_steps=4,
+            ),
+            dataloader=FluxDataLoader.Config(
+                # Validate on the local cc12m-test asset (no HF download) so CI
+                # does not flake on the network. Production flux_dev/flux_schnell
+                # still validate on the real coco-validation set.
+                dataset="cc12m-test",
+                prompt_dropout_prob=0.0,
+                img_size=256,
+                generate_timesteps=True,
+            ),
+            save_img_count=1,
+            save_img_folder="img",
+            all_timesteps=False,
+        ),
+        inference=Inference(
+            save_img_folder="inference_results",
+            prompts_path="./torchtitan/models/flux/inference/prompts.txt",
+            local_batch_size=2,
+        ),
+    )
+
+
+def flux_dev() -> FluxTrainer.Config:
+    return FluxTrainer.Config(
+        loss=MSELoss.Config(),
+        tokenizer=FluxTokenizerContainer.Config(
+            t5_tokenizer_path="google/t5-v1_1-xxl",
+            clip_tokenizer_path="openai/clip-vit-large-patch14",
+            max_t5_encoding_len=512,
+        ),
+        encoder=FluxEncoderConfig(
+            autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
+        ),
+        metrics=MetricsProcessor.Config(log_freq=100),
+        model_spec=model_registry("flux-dev"),
+        optimizer=default_adamw(lr=1e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=3000,
+            decay_ratio=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=32,
+            steps=30000,
+        ),
+        dataloader=FluxDataLoader.Config(
+            dataset="cc12m-wds",
+            prompt_dropout_prob=0.447,
+            img_size=256,
+        ),
+        activation_checkpoint=FullAC.Config(),
+        checkpoint=CheckpointManager.Config(interval=1000),
+        validator=FluxValidator.Config(
+            freq=1000,
+            steps=12,
+            sampling=SamplingConfig(
+                enable_classifier_free_guidance=True,
+                classifier_free_guidance_scale=5.0,
+                denoising_steps=50,
+            ),
+            dataloader=FluxDataLoader.Config(
+                dataset="coco-validation",
+                prompt_dropout_prob=0,
+                img_size=256,
+                generate_timesteps=True,
+            ),
+            save_img_count=50,
+            save_img_folder="img",
+            all_timesteps=False,
+        ),
+    )
+
+
+def flux_schnell() -> FluxTrainer.Config:
+    return FluxTrainer.Config(
+        loss=MSELoss.Config(),
+        tokenizer=FluxTokenizerContainer.Config(
+            t5_tokenizer_path="google/t5-v1_1-xxl",
+            clip_tokenizer_path="openai/clip-vit-large-patch14",
+            max_t5_encoding_len=256,
+        ),
+        encoder=FluxEncoderConfig(
+            autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
+        ),
+        metrics=MetricsProcessor.Config(log_freq=100),
+        model_spec=model_registry("flux-schnell"),
+        optimizer=default_adamw(lr=1e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=3000,
+            decay_ratio=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=64,
+            steps=30000,
+        ),
+        dataloader=FluxDataLoader.Config(
+            dataset="cc12m-wds",
+            prompt_dropout_prob=0.447,
+            img_size=256,
+        ),
+        activation_checkpoint=FullAC.Config(),
+        checkpoint=CheckpointManager.Config(interval=1000),
+        validator=FluxValidator.Config(
+            freq=1000,
+            steps=6,
+            sampling=SamplingConfig(
+                enable_classifier_free_guidance=True,
+                classifier_free_guidance_scale=5.0,
+                denoising_steps=50,
+            ),
+            dataloader=FluxDataLoader.Config(
+                dataset="coco-validation",
+                prompt_dropout_prob=0,
+                img_size=256,
+                generate_timesteps=True,
+            ),
+            save_img_count=50,
+            save_img_folder="img",
+            all_timesteps=False,
+        ),
+    )
+
+
+def flux_schnell_mxfp8() -> FluxTrainer.Config:
+    """Flux schnell with MXFP8 quantization and torch.compile.
+    Requires SM100+ (B200/B100) and torchao nightly."""
+    config = flux_schnell()
+    config.compile = CompileConfig(enable=True)
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "flux-schnell",
+        converters=[
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+                fqns=[
+                    "double_blocks",
+                    "single_blocks",
+                    "img_in",
+                    "txt_in",
+                    "time_in",
+                    "vector_in",
+                    "final_layer",
+                ],
+            ),
+        ],
+    )
+    return config
+
+
+def flux_dev_mxfp8() -> FluxTrainer.Config:
+    """Flux dev with MXFP8 quantization and torch.compile.
+    Requires SM100+ (B200/B100) and torchao nightly."""
+    config = flux_dev()
+    config.compile = CompileConfig(enable=True)
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "flux-dev",
+        converters=[
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+                fqns=[
+                    "double_blocks",
+                    "single_blocks",
+                    "img_in",
+                    "txt_in",
+                    "time_in",
+                    "vector_in",
+                    "final_layer",
+                ],
+            ),
+        ],
+    )
+    return config

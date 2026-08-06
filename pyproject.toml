@@ -1,0 +1,68 @@
+# ---- All project specifications ---- #
+[project]
+name = "torchtitan"
+description = "A PyTorch native platform for training generative AI models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [
+    { name = "PyTorch Team", email = "packages@pytorch.org" },
+]
+keywords = ["pytorch", "training", "llm"]
+dependencies = [
+    # Stateful Dataloader
+    "torchdata>=0.8.0",
+
+    # Hugging Face integrations
+    "datasets>=3.6.0",
+    "tokenizers>=0.15.0",
+    "safetensors",
+
+    # Miscellaneous
+    "tyro",
+    "tensorboard",
+    "wandb",
+    "einops",
+    "pillow",
+    "spmd_types==0.2.1",
+]
+dynamic = ["version"]
+
+[project.urls]
+GitHub = "https://github.com/pytorch/torchtitan"
+Documentation = "https://github.com/pytorch/torchtitan/tree/main/docs"
+Issues = "https://github.com/pytorch/torchtitan/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit",
+    "pytest",
+    "pytest-cov",
+    "expecttest", # test_tokenizer
+    "pyrefly==0.45.1",
+]
+
+[tool.setuptools.dynamic]
+version = {file = "assets/version.txt"}
+
+[tool.codespell]
+skip = ["*.json"]
+ignore-words-list = ["assertin", "datas" ,"indx", "inpt", "nd", "socio-economic"]
+
+# ---- Explicit project build information ---- #
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["torchtitan*"]
+
+[tool.pytest.ini_options]
+addopts = ["--showlocals"]  # show local variables in tracebacks
+testpaths = ["tests"]
+
+[tool.pyrefly]
+project-excludes = ["torchtitan/experiments", "**/tests/**"]
+replace-imports-with-any = ["torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "fla.*", "helion", "helion.*"]  # optional dependencies
+search-path = ["../pytorch"]  # local built pytorch
